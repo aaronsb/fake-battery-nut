@@ -2,10 +2,8 @@
 # nut-to-fakebattery - Feed NUT UPS data to fake_battery_nut kernel module
 #
 # This daemon reads data from NUT and writes it to /dev/fake_battery_nut
-# so that tools like btop can see UPS stats as battery info.
-#
-# BAT0 = UPS battery charge % and runtime
-# BAT1 = UPS load %
+# so that tools like btop and desktop environments (via UPower) can see
+# UPS battery status.
 
 DEVICE="/dev/fake_battery_nut"
 UPS="${NUT_UPS:-cyberpower@localhost}"
@@ -28,18 +26,13 @@ while true; do
 
     if [ -n "$DATA" ]; then
         BATTERY=$(echo "$DATA" | grep "^battery.charge:" | cut -d: -f2 | tr -d ' ')
-        LOAD=$(echo "$DATA" | grep "^ups.load:" | cut -d: -f2 | tr -d ' ')
         RUNTIME=$(echo "$DATA" | grep "^battery.runtime:" | cut -d: -f2 | tr -d ' ')
         VOLTAGE=$(echo "$DATA" | grep "^battery.voltage:" | cut -d: -f2 | tr -d ' ')
         STATUS=$(echo "$DATA" | grep "^ups.status:" | cut -d: -f2 | tr -d ' ')
-        INPUT_V=$(echo "$DATA" | grep "^input.voltage:" | cut -d: -f2 | tr -d ' ')
 
         # Convert voltage to microvolts (NUT reports in V)
         if [ -n "$VOLTAGE" ]; then
             VOLTAGE_UV=$(echo "$VOLTAGE * 1000000" | bc | cut -d. -f1)
-        fi
-        if [ -n "$INPUT_V" ]; then
-            INPUT_UV=$(echo "$INPUT_V * 1000000" | bc | cut -d. -f1)
         fi
 
         # Determine status value (0=discharging, 1=charging, 2=full)
@@ -57,12 +50,10 @@ while true; do
 
         # Write to kernel module
         {
-            [ -n "$BATTERY" ] && echo "capacity0=$BATTERY"
-            [ -n "$LOAD" ] && echo "capacity1=$LOAD"
-            [ -n "$RUNTIME" ] && echo "time0=$RUNTIME"
-            [ -n "$VOLTAGE_UV" ] && echo "voltage0=$VOLTAGE_UV"
-            [ -n "$INPUT_UV" ] && echo "voltage1=$INPUT_UV"
-            echo "status0=$STATUS_VAL"
+            [ -n "$BATTERY" ] && echo "capacity=$BATTERY"
+            [ -n "$RUNTIME" ] && echo "time=$RUNTIME"
+            [ -n "$VOLTAGE_UV" ] && echo "voltage=$VOLTAGE_UV"
+            echo "status=$STATUS_VAL"
             echo "charging=$AC_STATUS"
         } > "$DEVICE" 2>/dev/null
     fi

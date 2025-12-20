@@ -6,14 +6,11 @@
  *
  * Control interface: /dev/fake_battery_nut
  * Commands:
- *   capacity0=N   - Set BAT0 capacity (0-100) - maps to UPS battery charge
- *   capacity1=N   - Set BAT1 capacity (0-100) - maps to UPS load %
- *   time0=N       - Set BAT0 time_to_empty in seconds - maps to UPS runtime
- *   time1=N       - Set BAT1 time_to_empty in seconds
- *   voltage0=N    - Set BAT0 voltage in microvolts
- *   voltage1=N    - Set BAT1 voltage in microvolts
- *   status0=N     - Set BAT0 status (0=discharging, 1=charging, 2=full)
- *   status1=N     - Set BAT1 status
+ *   capacity=N    - Set battery capacity (0-100) - maps to UPS battery charge
+ *   time=N        - Set time_to_empty in seconds - maps to UPS runtime
+ *   voltage=N     - Set voltage in microvolts
+ *   temp=N        - Set temperature in tenths of °C (e.g., 260 = 26.0°C)
+ *   status=N      - Set status (0=discharging, 1=charging, 2=full)
  *   charging=N    - Set AC online status (0=offline, 1=online)
  *
  * This program is free software: you can redistribute it and/or modify
@@ -31,12 +28,7 @@
 #include <asm/uaccess.h>
 
 static int
-fake_battery_get_property1(struct power_supply *psy,
-        enum power_supply_property psp,
-        union power_supply_propval *val);
-
-static int
-fake_battery_get_property2(struct power_supply *psy,
+fake_battery_get_property(struct power_supply *psy,
         enum power_supply_property psp,
         union power_supply_propval *val);
 
@@ -51,28 +43,20 @@ static struct battery_status {
     int capacity;
     int time_left;
     int voltage;
-} fake_battery_statuses[2] = {
-    {
-        .status = POWER_SUPPLY_STATUS_FULL,
-        .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
-        .capacity = 100,
-        .time_left = 3600,
-        .voltage = 24000000,  /* 24V in microvolts */
-    },
-    {
-        .status = POWER_SUPPLY_STATUS_FULL,
-        .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
-        .capacity = 0,
-        .time_left = 0,
-        .voltage = 120000000, /* 120V in microvolts */
-    },
+    int temp;
+} fake_battery_status = {
+    .status = POWER_SUPPLY_STATUS_FULL,
+    .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
+    .capacity = 100,
+    .time_left = 3600,
+    .voltage = 24000000,  /* 24V in microvolts */
+    .temp = 260,          /* 26.0°C in tenths */
 };
 
 static int ac_status = 1;
 
 static char *fake_ac_supplies[] = {
     "BAT0",
-    "BAT1",
 };
 
 static enum power_supply_property fake_battery_properties[] = {
@@ -105,15 +89,7 @@ static struct power_supply_desc descriptions[] = {
         .type = POWER_SUPPLY_TYPE_BATTERY,
         .properties = fake_battery_properties,
         .num_properties = ARRAY_SIZE(fake_battery_properties),
-        .get_property = fake_battery_get_property1,
-    },
-
-    {
-        .name = "BAT1",
-        .type = POWER_SUPPLY_TYPE_BATTERY,
-        .properties = fake_battery_properties,
-        .num_properties = ARRAY_SIZE(fake_battery_properties),
-        .get_property = fake_battery_get_property2,
+        .get_property = fake_battery_get_property,
     },
 
     {
@@ -127,7 +103,6 @@ static struct power_supply_desc descriptions[] = {
 
 static struct power_supply_config configs[] = {
     { },
-    { },
     {
         .supplied_to = fake_ac_supplies,
         .num_supplicants = ARRAY_SIZE(fake_ac_supplies),
@@ -139,7 +114,7 @@ static struct power_supply *supplies[sizeof(descriptions) / sizeof(descriptions[
 static ssize_t
 control_device_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
-    static char *message = "fake_battery_nut: capacity0/1, time0/1, voltage0/1, status0/1, charging\n";
+    static char *message = "fake_battery_nut: capacity, time, voltage, temp, status, charging\n";
     size_t message_len = strlen(message);
 
     if(count < message_len) {
@@ -163,7 +138,7 @@ control_device_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
     (!strncmp((s), (prefix), sizeof(prefix)-1))
 
 static int
-handle_control_line(const char *line, int *ac_status, struct battery_status *batteries)
+handle_control_line(const char *line, int *ac_status, struct battery_status *battery)
 {
     char *value_p;
     long value;
@@ -184,50 +159,36 @@ handle_control_line(const char *line, int *ac_status, struct battery_status *bat
     }
 
     if(prefixed(line, "capacity")) {
-        int battery_num = line[sizeof("capacity") - 1] - '0';
-        if(battery_num != 0 && battery_num != 1) {
-            return -ERANGE;
-        }
-        batteries[battery_num].capacity = value;
+        battery->capacity = value;
         /* Auto-update capacity_level based on capacity */
         if(value >= 98) {
-            batteries[battery_num].capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
+            battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
         } else if(value >= 70) {
-            batteries[battery_num].capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_HIGH;
+            battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_HIGH;
         } else if(value >= 30) {
-            batteries[battery_num].capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+            battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
         } else if(value >= 5) {
-            batteries[battery_num].capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_LOW;
+            battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_LOW;
         } else {
-            batteries[battery_num].capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
+            battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
         }
     } else if(prefixed(line, "time")) {
-        int battery_num = line[sizeof("time") - 1] - '0';
-        if(battery_num != 0 && battery_num != 1) {
-            return -ERANGE;
-        }
-        batteries[battery_num].time_left = value;
+        battery->time_left = value;
     } else if(prefixed(line, "voltage")) {
-        int battery_num = line[sizeof("voltage") - 1] - '0';
-        if(battery_num != 0 && battery_num != 1) {
-            return -ERANGE;
-        }
-        batteries[battery_num].voltage = value;
+        battery->voltage = value;
+    } else if(prefixed(line, "temp")) {
+        battery->temp = value;
     } else if(prefixed(line, "status")) {
-        int battery_num = line[sizeof("status") - 1] - '0';
-        if(battery_num != 0 && battery_num != 1) {
-            return -ERANGE;
-        }
         switch(value) {
             case 0:
-                batteries[battery_num].status = POWER_SUPPLY_STATUS_DISCHARGING;
+                battery->status = POWER_SUPPLY_STATUS_DISCHARGING;
                 break;
             case 1:
-                batteries[battery_num].status = POWER_SUPPLY_STATUS_CHARGING;
+                battery->status = POWER_SUPPLY_STATUS_CHARGING;
                 break;
             case 2:
             default:
-                batteries[battery_num].status = POWER_SUPPLY_STATUS_FULL;
+                battery->status = POWER_SUPPLY_STATUS_FULL;
                 break;
         }
     } else if(prefixed(line, "charging")) {
@@ -270,7 +231,7 @@ control_device_write(struct file *file, const char *buffer, size_t count, loff_t
 
     while((newline = memchr(buffer_cursor, '\n', bytes_left))) {
         *newline = '\0';
-        status = handle_control_line(buffer_cursor, &ac_status, fake_battery_statuses);
+        status = handle_control_line(buffer_cursor, &ac_status, &fake_battery_status);
 
         if(status) {
             return status;
@@ -282,7 +243,6 @@ control_device_write(struct file *file, const char *buffer, size_t count, loff_t
 
     power_supply_changed(supplies[0]);
     power_supply_changed(supplies[1]);
-    power_supply_changed(supplies[2]);
 
     return count;
 }
@@ -300,17 +260,22 @@ static struct miscdevice control_device = {
 };
 
 static int
-fake_battery_generic_get_property(struct power_supply *psy,
+fake_battery_get_property(struct power_supply *psy,
         enum power_supply_property psp,
-        union power_supply_propval *val,
-        struct battery_status *status)
+        union power_supply_propval *val)
 {
     switch (psp) {
         case POWER_SUPPLY_PROP_MANUFACTURER:
             val->strval = "NUT";
             break;
+        case POWER_SUPPLY_PROP_MODEL_NAME:
+            val->strval = "UPS Battery";
+            break;
+        case POWER_SUPPLY_PROP_SERIAL_NUMBER:
+            val->strval = "NUT-UPS";
+            break;
         case POWER_SUPPLY_PROP_STATUS:
-            val->intval = status->status;
+            val->intval = fake_battery_status.status;
             break;
         case POWER_SUPPLY_PROP_CHARGE_TYPE:
             val->intval = POWER_SUPPLY_CHARGE_TYPE_FAST;
@@ -325,11 +290,11 @@ fake_battery_generic_get_property(struct power_supply *psy,
             val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
             break;
         case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
-            val->intval = status->capacity_level;
+            val->intval = fake_battery_status.capacity_level;
             break;
         case POWER_SUPPLY_PROP_CAPACITY:
         case POWER_SUPPLY_PROP_CHARGE_NOW:
-            val->intval = status->capacity;
+            val->intval = fake_battery_status.capacity;
             break;
         case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
         case POWER_SUPPLY_PROP_CHARGE_FULL:
@@ -337,54 +302,18 @@ fake_battery_generic_get_property(struct power_supply *psy,
             break;
         case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
         case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW:
-            val->intval = status->time_left;
+            val->intval = fake_battery_status.time_left;
             break;
         case POWER_SUPPLY_PROP_TEMP:
-            val->intval = 26;
+            val->intval = fake_battery_status.temp;
             break;
         case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-            val->intval = status->voltage;
+            val->intval = fake_battery_status.voltage;
             break;
         default:
             pr_info("%s: some properties deliberately report errors.\n",
                     __func__);
             return -EINVAL;
-    }
-    return 0;
-};
-
-static int
-fake_battery_get_property1(struct power_supply *psy,
-        enum power_supply_property psp,
-        union power_supply_propval *val)
-{
-    switch (psp) {
-        case POWER_SUPPLY_PROP_MODEL_NAME:
-            val->strval = "UPS Battery";
-            break;
-        case POWER_SUPPLY_PROP_SERIAL_NUMBER:
-            val->strval = "NUT-BAT0";
-            break;
-        default:
-            return fake_battery_generic_get_property(psy, psp, val, &fake_battery_statuses[0]);
-    }
-    return 0;
-}
-
-static int
-fake_battery_get_property2(struct power_supply *psy,
-        enum power_supply_property psp,
-        union power_supply_propval *val)
-{
-    switch (psp) {
-        case POWER_SUPPLY_PROP_MODEL_NAME:
-            val->strval = "UPS Load";
-            break;
-        case POWER_SUPPLY_PROP_SERIAL_NUMBER:
-            val->strval = "NUT-LOAD";
-            break;
-        default:
-            return fake_battery_generic_get_property(psy, psp, val, &fake_battery_statuses[1]);
     }
     return 0;
 }

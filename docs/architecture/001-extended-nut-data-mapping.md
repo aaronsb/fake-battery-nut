@@ -2,171 +2,144 @@
 
 ## Status
 
-Proposed
+Accepted (Partially Implemented)
 
 ## Context
 
-The `fake_battery_nut` kernel module currently exposes a subset of NUT UPS data through the Linux power_supply subsystem. While the basic mapping works (capacity, time, voltage, status), NUT provides significantly more data that could be valuable for monitoring.
+The `fake_battery_nut` kernel module exposes NUT UPS data through the Linux power_supply subsystem. Initially conceived as a way to show UPS stats in btop, we discovered a more significant value proposition:
 
-### Current Data Flow
+**NUT claims USB devices exclusively, preventing UPower from seeing UPS hardware natively. This module bridges NUT to UPower, enabling desktop power management integration.**
 
-```
-NUT UPS Data → upsc → nut-to-fakebattery daemon → /dev/fake_battery_nut → kernel module → /sys/class/power_supply/
-```
-
-### Currently Mapped
-
-| NUT Field | Kernel Module | power_supply Property |
-|-----------|---------------|----------------------|
-| battery.charge | capacity0 | BAT0/capacity |
-| ups.load | capacity1 | BAT1/capacity |
-| battery.runtime | time0 | BAT0/time_to_empty_avg |
-| battery.voltage | voltage0 | BAT0/voltage_now |
-| input.voltage | voltage1 | BAT1/voltage_now |
-| ups.status (OL/OB) | status0, charging | BAT0/status, AC0/online |
-
-### Available but Unmapped NUT Data
-
-From a typical CyberPower UPS:
+### Data Flow
 
 ```
-battery.charge.low: 10
-battery.charge.warning: 20
-battery.mfr.date: CPS
-battery.runtime.low: 300
-battery.type: PbAcid
-battery.voltage.nominal: 24
-input.sensitivity: normal
-input.transfer.high: 139
-input.transfer.low: 100
-input.voltage.nominal: 120
-output.voltage: 122.0
-ups.beeper.status: enabled
-ups.delay.shutdown: 60
-ups.delay.start: 120
-ups.firmware: BF01403CA
-ups.mfr: CPS
-ups.model: CST135XLU
-ups.power.nominal: 1350
-ups.realpower.nominal: 810
-ups.serial: CR7KS2003692
-ups.test.result: No test initiated
+UPS Hardware
+     │
+     ▼
+NUT (usbhid-ups driver claims USB exclusively)
+     │
+     ▼
+upsc queries ───► nut-to-fakebattery daemon
+                          │
+                          ▼
+                  /dev/fake_battery_nut
+                          │
+                          ▼
+                  kernel module
+                          │
+                          ▼
+              /sys/class/power_supply/
+                          │
+                          ▼
+                      UPower
+                          │
+                          ▼
+              Desktop Environment (KDE/GNOME)
 ```
 
-## Decision Drivers
+### Why This Matters
 
-1. **Monitoring completeness** - More data enables better dashboards and alerting
-2. **power_supply API constraints** - Limited to properties the kernel API supports
-3. **Complexity vs utility** - More control commands = more daemon complexity
-4. **btop limitations** - btop only shows capacity, time, status anyway
+Without this bridge:
+- NUT works fine for monitoring and scripted shutdown
+- UPower cannot see the UPS (`ups_hiddev*` doesn't exist)
+- Desktop environments have no idea a UPS exists
+- No battery icon, no low-power warnings, no auto-hibernate
 
-## Options Considered
+With this bridge:
+- Desktop sees UPS as a battery via `/sys/class/power_supply/BAT0`
+- KDE/GNOME show battery status, respond to power events
+- System can auto-hibernate when UPS battery is critical
+- btop also works (the original goal)
 
-### Option A: Minimal Extension (Recommended)
-
-Add only high-value fields that map cleanly to power_supply properties:
+### Currently Mapped (v1.1.0)
 
 | NUT Field | Control Command | power_supply Property |
 |-----------|-----------------|----------------------|
-| battery.charge.low | lowbat0=N | BAT0/charge_control_end_threshold |
-| output.voltage | - | Already via voltage1 |
-| ups.temperature | temp0=N | BAT0/temp |
+| battery.charge | capacity | BAT0/capacity |
+| battery.runtime | time | BAT0/time_to_empty_avg |
+| battery.voltage | voltage | BAT0/voltage_now |
+| ups.status (OL/OB) | status, charging | BAT0/status, AC0/online |
+| (settable) | temp | BAT0/temp |
 
-**Pros:**
-- Low complexity
-- Maps to existing kernel properties
-- Minimal daemon changes
+## Decision Drivers
 
-**Cons:**
-- Leaves most NUT data unmapped
+1. **Desktop integration** - UPower/KDE/GNOME can respond to UPS events
+2. **power_supply API constraints** - Limited to properties the kernel API supports
+3. **Simplicity** - Single battery device, clean UPower integration
+4. **The btop irony** - btop only shows `BAT= 100%` anyway
 
-### Option B: Sysfs Extension
+## Problem: BAT1 Pollution (Resolved)
 
-Add custom sysfs attributes beyond standard power_supply:
+The original design exposed two batteries:
+- BAT0: UPS battery charge %
+- BAT1: UPS load % (semantically wrong - load isn't a battery)
 
-```
-/sys/class/power_supply/BAT0/
-├── capacity          (standard)
-├── nut_model         (custom)
-├── nut_serial        (custom)
-├── nut_load_watts    (custom)
-├── nut_input_voltage (custom)
-└── ...
-```
+UPower's `DisplayDevice` averaged both, causing incorrect readings:
+- BAT0: 100%, BAT1: 21% → DisplayDevice: ~34% (wrong!)
 
-**Pros:**
-- Can expose any NUT data
-- Queryable by any tool
+**Resolution:** Removed BAT1 entirely. Load monitoring available via `upsc` directly.
 
-**Cons:**
-- Non-standard attributes may confuse tools
-- More kernel code complexity
-- May not integrate with existing monitors
+## Options Considered
 
-### Option C: Companion Daemon with JSON/Socket
+### Option A: Minimal Extension ✓ Implemented
 
-Keep kernel module minimal, add a companion that serves full NUT data:
+Single battery (BAT0) with settable temperature:
 
-```
-/run/fake-battery-nut/status.json
-```
+| Field | Command | Notes |
+|-------|---------|-------|
+| capacity | capacity=N | 0-100% |
+| runtime | time=N | seconds |
+| voltage | voltage=N | microvolts |
+| temperature | temp=N | tenths of °C (260 = 26.0°C) |
+| status | status=N | 0=discharging, 1=charging, 2=full |
+| AC online | charging=N | 0=offline, 1=online |
 
-Or a Unix socket that tools can query.
+### Option B: Sysfs Extension (Rejected)
 
-**Pros:**
-- Full data access
-- No kernel complexity
-- Easier to update
+Custom sysfs attributes for all NUT data. Too complex, non-standard attributes may confuse tools.
 
-**Cons:**
-- Doesn't help btop (the original goal)
-- Another daemon to maintain
+### Option C: Companion Daemon (Rejected)
 
-### Option D: Temperature Focus
+JSON/socket daemon for full NUT data. Doesn't help desktop integration - UPower needs power_supply devices.
 
-NUT reports no temperature, but the kernel module has a temp field (currently hardcoded to 26°C). We could:
+### Option D: Temperature from hwmon (Deferred)
 
-1. Add ambient temperature from system sensors
-2. Leave as placeholder
-3. Remove the property
-
-## Proposed Decision
-
-**Option A: Minimal Extension** with the following additions:
-
-1. **Temperature** - Allow setting via `temp0=N` (in tenths of °C)
-   - Daemon could read from system sensors if desired
-
-2. **Model/Manufacturer strings** - Already in module, could make dynamic via:
-   - `model0=UPS Model Name`
-   - `mfr0=CyberPower`
-
-3. **Consider BAT1 repurposing** - Currently shows "load %" as capacity, which is semantically wrong. Options:
-   - Keep as-is (works, just weird)
-   - Rename model to "UPS Load Meter" (done)
-   - Remove BAT1, use only BAT0
+The daemon could read ambient temperature from system sensors. Currently left as settable placeholder (defaults to 26.0°C). Most consumer UPS units don't report temperature anyway.
 
 ## Consequences
 
-### If Accepted
+### Positive
 
-- Kernel module gains 2-3 new control commands
-- Daemon script needs corresponding NUT field extraction
-- Documentation update required
-- Version bump to 1.1.0
+- Clean UPower integration (single battery, accurate %)
+- Desktop environments can auto-hibernate on low UPS battery
+- Simplified kernel module (removed BAT1 complexity)
+- Temperature now displays correctly (was showing 2.6°C, now 26.0°C)
 
-### If Rejected
+### Negative
 
-- Current implementation is functional
-- btop shows what it can show (capacity %)
-- Advanced users can query NUT directly
+- Lost load % monitoring in btop (use `upsc` or other NUT tools)
+- Temperature is placeholder unless daemon sets it
 
-## Notes
+### Neutral
 
-The irony of this project should be preserved: we wrote a kernel module because btop doesn't have plugins, and btop only displays `BAT= 100%` anyway. Any extensions should be evaluated against "does btop even show this?"
+- UPower sees device as "battery" not "UPS" (kernel's POWER_SUPPLY_TYPE_UPS isn't handled by UPower)
+
+## Implementation Notes
+
+Changes in v1.1.0:
+- Removed BAT1 (load meter) - fixes UPower DisplayDevice pollution
+- Simplified control interface (removed numbered suffixes: `capacity0` → `capacity`)
+- Fixed temperature unit bug (26 → 260 tenths of °C)
+- Added `temp=N` control command
+
+## The Preserved Irony
+
+We wrote a kernel module because btop doesn't have plugins. btop displays `BAT= 100%`. But accidentally, we built the missing bridge between NUT and desktop power management that nobody else bothered to make.
+
+The walnut-powered PC image remains canonical.
 
 ## References
 
 - [Linux power_supply class documentation](https://www.kernel.org/doc/html/latest/power/power_supply_class.html)
 - [NUT variable naming](https://networkupstools.org/docs/developer-guide.chunked/apas01.html)
-- Project README "The Duality of Engineering" section
+- [UPower Reference Manual](https://upower.freedesktop.org/docs/UPower.html)
