@@ -2,6 +2,29 @@
 
 A Linux kernel module that bridges NUT (Network UPS Tools) to the desktop power stack, making any NUT-supported UPS appear as a laptop battery to your desktop environment.
 
+![Walnut-powered PC](docs/media/battery-nut.png)
+
+### The Duality of Engineering
+
+**Power delivery:**
+```
+Wall → 1350VA UPS → surge-only outlet → 450VA mini UPS → monitor
+                  → battery outlet → gaming PC (93% load)
+```
+*"eh, the cords are beefy, it's probably fine"*
+
+**Monitoring:**
+```
+UPS → USB HID → NUT daemon → upsc → bash script →
+/dev/fake_battery_nut → custom kernel module →
+/sys/class/power_supply/ → UPower → KDE
+```
+*"we need proper kernel-level integration for the data to show up correctly"*
+
+One is an extension cord chain held together by vibes. The other is a DKMS-managed kernel module with systemd integration.
+
+---
+
 ## The Problem
 
 Linux has two parallel power management systems that don't talk to each other:
@@ -36,27 +59,6 @@ But then: "I want to see UPS stats in btop."
 btop doesn't support NUT. So we wrote a kernel module.
 
 Then we discovered UPower couldn't see the UPS either, because NUT had claimed it. So accidentally, we built the missing bridge between NUT and desktop power management.
-
-### The Duality of Engineering
-
-**Power delivery:**
-```
-Wall → 1350VA UPS → surge-only outlet → 450VA mini UPS → monitor
-                  → battery outlet → gaming PC (93% load)
-```
-*"eh, the cords are beefy, it's probably fine"*
-
-**Monitoring:**
-```
-UPS → USB HID → NUT daemon → upsc → bash script →
-/dev/fake_battery_nut → custom kernel module →
-/sys/class/power_supply/ → UPower → KDE
-```
-*"we need proper kernel-level integration for the data to show up correctly"*
-
-One is an extension cord chain held together by vibes. The other is a DKMS-managed kernel module with systemd integration.
-
-![Walnut-powered PC](docs/media/battery-nut.png)
 
 ## Components
 
