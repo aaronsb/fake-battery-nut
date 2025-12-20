@@ -3,10 +3,45 @@
 # fake-battery-nut - AUR Publishing Script
 #
 # Automates the process of publishing updates to the AUR package.
-# Usage: ./publish-aur.sh [commit-message]
+# Usage: ./publish-aur.sh [-y|--yes] [commit-message]
+#
+# Options:
+#   -y, --yes    Skip all confirmation prompts (non-interactive mode)
 #
 
 set -e
+
+# Parse flags
+AUTO_CONFIRM=false
+COMMIT_MSG=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -y|--yes)
+            AUTO_CONFIRM=true
+            shift
+            ;;
+        *)
+            COMMIT_MSG="$1"
+            shift
+            ;;
+    esac
+done
+
+# Helper for confirmations
+confirm() {
+    local prompt="$1"
+    local default="${2:-N}"
+    if [ "$AUTO_CONFIRM" = true ]; then
+        return 0
+    fi
+    read -p "$prompt " -n 1 -r
+    echo ""
+    if [ "$default" = "Y" ]; then
+        [[ ! $REPLY =~ ^[Nn]$ ]]
+    else
+        [[ $REPLY =~ ^[Yy]$ ]]
+    fi
+}
 
 # Colors for output
 if [ -t 1 ]; then
@@ -52,9 +87,7 @@ if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     print_msg "$YELLOW" "⚠️  Warning: You have uncommitted changes"
     git status --short
     echo ""
-    read -p "Continue anyway? [y/N] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if ! confirm "Continue anyway? [y/N]" "N"; then
         print_msg "$YELLOW" "Publish cancelled. Commit your changes first."
         exit 0
     fi
@@ -81,9 +114,7 @@ if [ "$AHEAD" -gt 0 ]; then
     print_msg "$YELLOW" "⚠️  Warning: Your local branch is $AHEAD commit(s) ahead of origin/$CURRENT_BRANCH"
     print_msg "$YELLOW" "You need to push to GitHub before publishing to AUR!"
     echo ""
-    read -p "Push to origin/$CURRENT_BRANCH now? [Y/n] " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    if confirm "Push to origin/$CURRENT_BRANCH now? [Y/n]" "Y"; then
         git push origin "$CURRENT_BRANCH"
         print_msg "$GREEN" "✓ Pushed to origin/$CURRENT_BRANCH"
     else
@@ -100,9 +131,7 @@ echo ""
 TAG_NAME="v${PKGVER}"
 if ! git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
     print_msg "$YELLOW" "⚠️  Warning: Git tag $TAG_NAME does not exist"
-    read -p "Create tag $TAG_NAME now? [y/N] " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if confirm "Create tag $TAG_NAME now? [y/N]" "N"; then
         git tag -a "$TAG_NAME" -m "Release version ${PKGVER}"
         print_msg "$GREEN" "✓ Created tag $TAG_NAME"
         echo ""
@@ -119,9 +148,7 @@ else
         print_msg "$GREEN" "✓ Tag $TAG_NAME is pushed to remote"
     else
         print_msg "$YELLOW" "⚠️  Warning: Tag $TAG_NAME exists locally but not on remote"
-        read -p "Push tag to remote now? [Y/n] " -n 1 -r
-        echo ""
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        if confirm "Push tag to remote now? [Y/n]" "Y"; then
             git push origin "$TAG_NAME"
             print_msg "$GREEN" "✓ Pushed tag $TAG_NAME to remote"
         else
@@ -190,10 +217,8 @@ if git diff --cached --quiet; then
     exit 0
 fi
 
-# Get commit message
-if [ -n "$1" ]; then
-    COMMIT_MSG="$1"
-else
+# Get commit message (use default if not provided)
+if [ -z "$COMMIT_MSG" ]; then
     COMMIT_MSG="Update to version ${PKGVER}-${PKGREL}"
 fi
 
@@ -206,10 +231,8 @@ echo ""
 print_msg "$YELLOW" "📤 Ready to push to AUR:"
 git log --oneline -1
 echo ""
-read -p "Push to AUR now? [Y/n] " -n 1 -r
-echo ""
 
-if [[ $REPLY =~ ^[Nn]$ ]]; then
+if ! confirm "Push to AUR now? [Y/n]" "Y"; then
     print_msg "$YELLOW" "Publish cancelled. Changes are committed locally in $AUR_DIR"
     exit 0
 fi
