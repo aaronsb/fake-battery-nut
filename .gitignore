@@ -1,0 +1,22 @@
+# Build artifacts
+*.o
+*.ko
+*.ko.zst
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+.tmp_versions/
+
+# Editor
+*.swp
+*~
+.vscode/
+.idea/
+
+# Package builds
+pkg/
+src/
+*.tar.gz
+*.tar.zst
