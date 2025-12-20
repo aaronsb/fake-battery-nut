@@ -10,7 +10,7 @@ depends=('dkms' 'nut' 'bc')
 makedepends=('linux-headers')
 install=${pkgname}.install
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/aaronsb/fake-battery-nut/archive/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('30545667d6f1de043d907fe3db533f04b14f50960fba6048d0c194ade4fdf747')
 
 package() {
     cd "$srcdir/fake-battery-nut-${pkgver}"
