@@ -8,6 +8,35 @@ Many system monitors (btop, KDE battery widget, etc.) read battery info from the
 
 This module creates virtual battery devices that a userspace daemon can update with NUT data, bridging the gap.
 
+## The Origin Story
+
+This project was born when a gaming PC (Ryzen 9950X3D, RX 7900 XTX, 57" ultrawide) started tripping UPS overload alarms while running Minecraft with shaders. After plugging in a USB cable that had been ignored for 4 years, we discovered the UPS was running at 123% capacity.
+
+The fix? Move the monitor to a different UPS. $0 solution. Problem solved.
+
+But then: "I want to see UPS stats in btop."
+
+btop doesn't support NUT. So we wrote a kernel module.
+
+### The Duality of Engineering
+
+**Power delivery:**
+```
+Wall → 1350VA UPS → surge-only outlet → 450VA mini UPS → monitor
+                  → battery outlet → gaming PC (93% load)
+```
+*"eh, the cords are beefy, it's probably fine"*
+
+**Monitoring:**
+```
+UPS → USB HID → NUT daemon → upsc → bash script →
+/dev/fake_battery_nut → custom kernel module →
+/sys/class/power_supply/ → btop
+```
+*"we need proper kernel-level integration for the data to show up correctly"*
+
+One is an extension cord chain held together by vibes. The other is a DKMS-managed kernel module with systemd integration, published on GitHub, ready for AUR.
+
 ## Components
 
 - **fake_battery_nut.ko** - Kernel module creating BAT0, BAT1, AC0 in `/sys/class/power_supply/`
