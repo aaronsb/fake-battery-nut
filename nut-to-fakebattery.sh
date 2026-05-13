@@ -28,11 +28,17 @@ while true; do
         BATTERY=$(echo "$DATA" | grep "^battery.charge:" | cut -d: -f2 | tr -d ' ')
         RUNTIME=$(echo "$DATA" | grep "^battery.runtime:" | cut -d: -f2 | tr -d ' ')
         VOLTAGE=$(echo "$DATA" | grep "^battery.voltage:" | cut -d: -f2 | tr -d ' ')
+        TEMP=$(echo "$DATA" | grep "^ups.temperature:" | cut -d: -f2 | tr -d ' ')
         STATUS=$(echo "$DATA" | grep "^ups.status:" | cut -d: -f2 | tr -d ' ')
 
         # Convert voltage to microvolts (NUT reports in V)
         if [ -n "$VOLTAGE" ]; then
             VOLTAGE_UV=$(echo "$VOLTAGE * 1000000" | bc | cut -d. -f1)
+        fi
+
+        # Convert temp to decidegrees (NUT reports in °C)
+        if [ -n "$TEMP" ]; then
+            TEMP_DD=$(echo "$TEMP * 10" | bc | cut -d. -f1)
         fi
 
         # Determine status value (0=discharging, 1=charging, 2=full)
@@ -52,6 +58,7 @@ while true; do
         {
             [ -n "$BATTERY" ] && echo "capacity=$BATTERY"
             [ -n "$RUNTIME" ] && echo "time=$RUNTIME"
+            [ -n "$TEMP_DD" ] && echo "temp=$TEMP_DD"
             [ -n "$VOLTAGE_UV" ] && echo "voltage=$VOLTAGE_UV"
             echo "status=$STATUS_VAL"
             echo "charging=$AC_STATUS"
