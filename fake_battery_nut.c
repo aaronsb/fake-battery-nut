@@ -6,12 +6,16 @@
  *
  * Control interface: /dev/fake_battery_nut
  * Commands:
- *   capacity=N    - Set battery capacity (0-100) - maps to UPS battery charge
- *   time=N        - Set time_to_empty in seconds - maps to UPS runtime
- *   voltage=N     - Set voltage in microvolts
- *   temp=N        - Set temperature in tenths of °C (e.g., 260 = 26.0°C)
- *   status=N      - Set status (0=discharging, 1=charging, 2=full, 3=not charging)
- *   charging=N    - Set AC online status (0=offline, 1=online)
+ *   capacity=N       - Set battery capacity (0-100) - maps to UPS battery charge
+ *   time=N           - Set time_to_empty in seconds - maps to UPS runtime
+ *   voltage=N        - Set voltage in microvolts
+ *   temp=N           - Set temperature in tenths of °C (e.g., 260 = 26.0°C)
+ *   status=N         - Set status (0=discharging, 1=charging, 2=full, 3=not charging)
+ *   charging=N       - Set AC online status (0=offline, 1=online)
+ *   manufacturer=S   - Set manufacturer string
+ *   model=S          - Set model name string
+ *   serial=S         - Set serial number string
+ *   technology=N     - Set technology (0=Unknown .. 6=LiMn)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -40,6 +44,8 @@ fake_ac_get_property(struct power_supply *psy,
         enum power_supply_property psp,
         union power_supply_propval *val);
 
+#define FAKE_STRING_PROP_LEN 64
+
 static struct battery_status {
     int status;
     int capacity_level;
@@ -47,6 +53,10 @@ static struct battery_status {
     int time_left;
     int voltage;
     int temp;
+    int technology;
+    char manufacturer[FAKE_STRING_PROP_LEN];
+    char model_name[FAKE_STRING_PROP_LEN];
+    char serial_number[FAKE_STRING_PROP_LEN];
 } fake_battery_status = {
     .status = POWER_SUPPLY_STATUS_FULL,
     .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
@@ -54,6 +64,10 @@ static struct battery_status {
     .time_left = 3600,
     .voltage = 24000000,  /* 24V in microvolts */
     .temp = 260,          /* 26.0°C in tenths */
+    .technology = POWER_SUPPLY_TECHNOLOGY_LION,
+    .manufacturer = "NUT",
+    .model_name = "UPS Battery",
+    .serial_number = "NUT-UPS",
 };
 
 static int ac_status = 1;
@@ -138,7 +152,9 @@ notify_supplies(void)
 static ssize_t
 control_device_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
-    static char *message = "fake_battery_nut: capacity, time, voltage, temp, status, charging\n";
+    static char *message =
+        "fake_battery_nut: capacity, time, voltage, temp, status, charging, "
+        "manufacturer, model, serial, technology\n";
     size_t message_len = strlen(message);
 
     (void)file;
@@ -185,11 +201,61 @@ strip_trailing_cr(char *line)
 }
 
 static int
+set_string_prop(char *dest, size_t dest_size, const char *value)
+{
+    const char *end;
+    size_t len;
+    size_t i;
+
+    value = skip_spaces(value);
+    end = value + strlen(value);
+    while(end > value && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    len = end - value;
+    if(len == 0 || len >= dest_size) {
+        return -EINVAL;
+    }
+    for(i = 0; i < len; i++) {
+        if(!isprint((unsigned char)value[i])) {
+            return -EINVAL;
+        }
+    }
+    memcpy(dest, value, len);
+    dest[len] = '\0';
+    return 0;
+}
+
+static int
+parse_int_value(const char *value_p, long *value)
+{
+    const char *end;
+    char number[32];
+    size_t len;
+
+    /* Reject trailing non-number junk (kstrtol is strict; trim spaces only). */
+    end = value_p + strlen(value_p);
+    while(end > value_p && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    if(end == value_p) {
+        return -EINVAL;
+    }
+
+    len = end - value_p;
+    if(len >= sizeof(number)) {
+        return -EINVAL;
+    }
+    memcpy(number, value_p, len);
+    number[len] = '\0';
+    return kstrtol(number, 10, value);
+}
+
+static int
 handle_control_line(const char *line, int *ac_online, struct battery_status *battery)
 {
     const char *eq;
     const char *value_p;
-    const char *end;
     long value;
     int ret;
 
@@ -201,26 +267,22 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
     }
 
     value_p = skip_spaces(eq + 1);
-    /* Reject trailing non-number junk (kstrtol is strict; trim spaces only). */
-    end = value_p + strlen(value_p);
-    while(end > value_p && isspace((unsigned char)end[-1])) {
-        end--;
+
+    /* String identity fields (fallback defaults remain until first valid set). */
+    if(key_matches(line, eq, "manufacturer")) {
+        return set_string_prop(battery->manufacturer,
+                               sizeof(battery->manufacturer), value_p);
     }
-    if(end == value_p) {
-        return -EINVAL;
+    if(key_matches(line, eq, "model")) {
+        return set_string_prop(battery->model_name,
+                               sizeof(battery->model_name), value_p);
+    }
+    if(key_matches(line, eq, "serial")) {
+        return set_string_prop(battery->serial_number,
+                               sizeof(battery->serial_number), value_p);
     }
 
-    {
-        char number[32];
-        size_t len = end - value_p;
-
-        if(len >= sizeof(number)) {
-            return -EINVAL;
-        }
-        memcpy(number, value_p, len);
-        number[len] = '\0';
-        ret = kstrtol(number, 10, &value);
-    }
+    ret = parse_int_value(value_p, &value);
     if(ret) {
         return ret;
     }
@@ -280,6 +342,20 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
             return -EINVAL;
         }
         *ac_online = (int)value;
+    } else if(key_matches(line, eq, "technology")) {
+        switch(value) {
+            case POWER_SUPPLY_TECHNOLOGY_UNKNOWN:
+            case POWER_SUPPLY_TECHNOLOGY_NiMH:
+            case POWER_SUPPLY_TECHNOLOGY_LION:
+            case POWER_SUPPLY_TECHNOLOGY_LIPO:
+            case POWER_SUPPLY_TECHNOLOGY_LiFe:
+            case POWER_SUPPLY_TECHNOLOGY_NiCd:
+            case POWER_SUPPLY_TECHNOLOGY_LiMn:
+                battery->technology = (int)value;
+                break;
+            default:
+                return -EINVAL;
+        }
     } else {
         return -EINVAL;
     }
@@ -387,20 +463,21 @@ fake_battery_get_property(struct power_supply *psy,
         union power_supply_propval *val)
 {
     struct battery_status status;
+    int ret = 0;
 
     mutex_lock(&status_lock);
     status = fake_battery_status;
-    mutex_unlock(&status_lock);
 
     switch (psp) {
         case POWER_SUPPLY_PROP_MANUFACTURER:
-            val->strval = "NUT";
+            /* Persistent buffers; core sprintf()s immediately after return. */
+            val->strval = fake_battery_status.manufacturer;
             break;
         case POWER_SUPPLY_PROP_MODEL_NAME:
-            val->strval = "UPS Battery";
+            val->strval = fake_battery_status.model_name;
             break;
         case POWER_SUPPLY_PROP_SERIAL_NUMBER:
-            val->strval = "NUT-UPS";
+            val->strval = fake_battery_status.serial_number;
             break;
         case POWER_SUPPLY_PROP_STATUS:
             val->intval = status.status;
@@ -415,7 +492,7 @@ fake_battery_get_property(struct power_supply *psy,
             val->intval = 1;
             break;
         case POWER_SUPPLY_PROP_TECHNOLOGY:
-            val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
+            val->intval = status.technology;
             break;
         case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
             val->intval = status.capacity_level;
@@ -449,9 +526,11 @@ fake_battery_get_property(struct power_supply *psy,
             val->intval = status.voltage;
             break;
         default:
-            return -EINVAL;
+            ret = -EINVAL;
+            break;
     }
-    return 0;
+    mutex_unlock(&status_lock);
+    return ret;
 }
 
 static int

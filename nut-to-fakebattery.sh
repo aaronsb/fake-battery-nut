@@ -16,13 +16,22 @@ log() {
     logger -t nut-to-fakebattery -- "$@"
 }
 
+# Write a control payload to the device. Pass -q to skip failure logging
+# (used for best-effort identity updates on older modules).
 write_device() {
     local data
+    local quiet=0
+
+    if [ "${1:-}" = "-q" ]; then
+        quiet=1
+        shift
+    fi
 
     # Slurp stdin, then one open/write so the whole update is one payload.
+    # Suppress bash's "printf: write error" — we log failures ourselves.
     data=$(cat) || return 1
-    if ! printf '%s' "$data" > "$DEVICE"; then
-        log "Failed to write to $DEVICE"
+    if ! { printf '%s' "$data" > "$DEVICE"; } 2>/dev/null; then
+        [ "$quiet" -eq 0 ] && log "Failed to write to $DEVICE"
         return 1
     fi
 }
@@ -61,6 +70,50 @@ clamp_nonneg_int() {
     else
         printf '%s' "$n"
     fi
+}
+
+# First non-empty nut_get among the given keys (prefer earlier keys).
+nut_get_first() {
+    local key val
+    for key in "$@"; do
+        val=$(nut_get "$key")
+        if [ -n "$val" ]; then
+            printf '%s' "$val"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Printable ASCII only, max 63 chars — matches kernel string prop limits.
+sanitize_string_prop() {
+    local raw="$1"
+    local cleaned
+
+    cleaned=$(printf '%s' "$raw" | tr -cd '[:print:]')
+    cleaned="${cleaned#"${cleaned%%[![:space:]]*}"}"
+    cleaned="${cleaned%"${cleaned##*[![:space:]]}"}"
+    if [ -z "$cleaned" ]; then
+        return 1
+    fi
+    printf '%s' "${cleaned:0:63}"
+}
+
+# Map NUT battery.type to POWER_SUPPLY_TECHNOLOGY_* enum values.
+# PbAc (lead-acid) has no kernel enum → Unknown (0).
+map_technology() {
+    local t
+    t=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$t" in
+        pbac|leadacid|lead-acid|"lead acid") printf '0' ;;  # UNKNOWN
+        nimh) printf '1' ;;
+        li|lion|li-ion|liion|lithium*|lithium-ion) printf '2' ;;  # LION
+        lipo|li-po|lipolymer|li-polymer) printf '3' ;;  # LIPO
+        life|lifepo4|li-fe|lithium-iron*) printf '4' ;;  # LiFe
+        nicd|ni-cd) printf '5' ;;
+        limn|li-mn) printf '6' ;;
+        *) return 1 ;;
+    esac
 }
 
 # True if haystack contains needle as a whole whitespace-delimited token.
@@ -152,6 +205,11 @@ while true; do
                 VOLTAGE_UV=$(clamp_nonneg_int "$(int_field "$VOLTAGE_UV")")
             fi
 
+            MANUFACTURER=$(sanitize_string_prop "$(nut_get_first device.mfr ups.mfr)" || true)
+            MODEL=$(sanitize_string_prop "$(nut_get_first device.model ups.model)" || true)
+            SERIAL=$(sanitize_string_prop "$(nut_get_first device.serial ups.serial)" || true)
+            TECHNOLOGY=$(map_technology "$(nut_get battery.type)" || true)
+
             # status: 0=discharging, 1=charging, 2=full, 3=not charging
             # NOCOMM = data path lost; do not keep reporting online/full.
             STATUS_VAL=3
@@ -166,6 +224,17 @@ while true; do
                 STATUS_VAL=2
             else
                 STATUS_VAL=3
+            fi
+
+            # Identity fields in a separate quiet write: older modules reject
+            # unknown keys with EINVAL and would abort a combined payload.
+            if [ -n "${MANUFACTURER}${MODEL}${SERIAL}${TECHNOLOGY}" ]; then
+                {
+                    [ -n "$MANUFACTURER" ] && echo "manufacturer=$MANUFACTURER"
+                    [ -n "$MODEL" ] && echo "model=$MODEL"
+                    [ -n "$SERIAL" ] && echo "serial=$SERIAL"
+                    [ -n "$TECHNOLOGY" ] && echo "technology=$TECHNOLOGY"
+                } | write_device -q || true
             fi
 
             if {
