@@ -91,7 +91,7 @@ Single battery (BAT0) with settable temperature:
 | runtime | time=N | seconds |
 | voltage | voltage=N | microvolts |
 | temperature | temp=N | tenths of °C (260 = 26.0°C) |
-| status | status=N | 0=discharging, 1=charging, 2=full |
+| status | status=N | 0=discharging, 1=charging, 2=full, 3=not charging |
 | AC online | charging=N | 0=offline, 1=online |
 
 ### Option B: Sysfs Extension (Rejected)
