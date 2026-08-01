@@ -1,14 +1,38 @@
 [Unit]
 Description=NUT UPS to Fake Battery Bridge
-After=nut-server.service
-Wants=nut-server.service
+Documentation=https://github.com/aaronsb/fake-battery-nut
+# Local NUT is optional; remote UPS monitoring needs network.
+# modules-load creates /dev/fake_battery_nut before the daemon waits on it.
+After=network-online.target nut-server.service systemd-modules-load.service
+Wants=network-online.target nut-server.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
+User=nut
+Group=nut
 Environment=NUT_UPS=cyberpower@localhost
 ExecStart=/usr/bin/nut-to-fakebattery
 Restart=on-failure
 RestartSec=5
+
+# Hardening: only the control device is writable; upsc may use TCP or UNIX sockets.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DevicePolicy=closed
+DeviceAllow=/dev/fake_battery_nut rw
 
 [Install]
 WantedBy=multi-user.target
