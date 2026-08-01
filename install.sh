@@ -1,9 +1,15 @@
 #!/bin/bash
-# fake-battery-nut installer
+# fake-battery-nut installer / updater
+#
+# Safe to re-run: force-rebuilds the DKMS module for the same version,
+# reloads it into the running kernel, and refreshes the daemon/service.
 set -e
 
 VERSION="1.2.1"
-SRCDIR="/usr/src/fake-battery-nut-${VERSION}"
+DKMS_NAME="fake-battery-nut"
+MODULE="fake_battery_nut"
+SERVICE="fake-battery-nut.service"
+SRCDIR="/usr/src/${DKMS_NAME}-${VERSION}"
 
 echo "=== Installing fake-battery-nut v${VERSION} ==="
 
@@ -45,29 +51,49 @@ if ! pacman -Q linux-headers &> /dev/null; then
     exit 1
 fi
 
-# Install DKMS module
+# Preserve drop-in config; only restart later if it was already running.
+SERVICE_WAS_ACTIVE=0
+if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    SERVICE_WAS_ACTIVE=1
+fi
+
+# Daemon holds /dev/fake_battery_nut open — stop it before rmmod.
+echo "Stopping service (if running)..."
+systemctl stop "$SERVICE" 2>/dev/null || true
+
+echo "Unloading module (if loaded)..."
+if lsmod | grep -q "^${MODULE} "; then
+    if ! rmmod "$MODULE"; then
+        echo "ERROR: could not unload $MODULE (is something else using it?)"
+        exit 1
+    fi
+fi
+
+# Refresh sources and force a clean DKMS rebuild for this same version.
+# Without remove+re-add, `dkms build` may reuse a stale .ko when VERSION is unchanged.
 echo "Installing DKMS module..."
 mkdir -p "$SRCDIR"
 cp fake_battery_nut.c "$SRCDIR/"
 cp Makefile "$SRCDIR/"
 cp dkms.conf "$SRCDIR/"
 
-dkms add -m fake-battery-nut -v "$VERSION" 2>/dev/null || true
-dkms build -m fake-battery-nut -v "$VERSION"
-dkms install -m fake-battery-nut -v "$VERSION" --force
+dkms remove -m "$DKMS_NAME" -v "$VERSION" --all 2>/dev/null || true
+dkms add -m "$DKMS_NAME" -v "$VERSION"
+dkms build -m "$DKMS_NAME" -v "$VERSION"
+dkms install -m "$DKMS_NAME" -v "$VERSION" --force
 
 # Auto-load module on boot
 echo "Configuring module autoload..."
-echo "fake_battery_nut" > /etc/modules-load.d/fake-battery-nut.conf
+echo "$MODULE" > /etc/modules-load.d/fake-battery-nut.conf
 
-# Load module now
-modprobe fake_battery_nut 2>/dev/null || insmod "$(modinfo -n fake_battery_nut)"
+echo "Loading module..."
+modprobe "$MODULE"
 
 # Install daemon
 echo "Installing daemon..."
 install -Dm755 nut-to-fakebattery.sh /usr/bin/nut-to-fakebattery
 
-# Install systemd service
+# Install systemd service (does not touch systemctl edit drop-ins)
 echo "Installing systemd service..."
 install -Dm644 fake-battery-nut.service /etc/systemd/system/fake-battery-nut.service
 
@@ -81,7 +107,12 @@ udevadm trigger --name-match=fake_battery_nut 2>/dev/null || true
 
 # Reload systemd and enable service
 systemctl daemon-reload
-systemctl enable fake-battery-nut
+systemctl enable "$SERVICE"
+
+if [ "$SERVICE_WAS_ACTIVE" -eq 1 ]; then
+    echo "Restarting service..."
+    systemctl start "$SERVICE"
+fi
 
 echo ""
 echo "=== Installation complete ==="
@@ -91,9 +122,10 @@ echo "  sudo systemctl edit fake-battery-nut"
 echo "  # [Service]"
 echo "  # Environment=NUT_UPS=yourups@host"
 echo ""
-echo "Then start the service:"
+echo "Then start the service (if not already running):"
 echo "  sudo systemctl start fake-battery-nut"
 echo ""
 echo "Check status:"
 echo "  cat /sys/class/power_supply/BAT0/capacity"
+echo "  cat /sys/class/power_supply/BAT0/manufacturer"
 echo "  cat /sys/class/power_supply/AC0/online"
