@@ -2,7 +2,7 @@
 # fake-battery-nut installer
 set -e
 
-VERSION="1.0.0"
+VERSION="1.2.1"
 SRCDIR="/usr/src/fake-battery-nut-${VERSION}"
 
 echo "=== Installing fake-battery-nut v${VERSION} ==="
@@ -17,6 +17,21 @@ fi
 echo "Checking dependencies..."
 if ! command -v upsc &> /dev/null; then
     echo "ERROR: NUT not installed. Install with: pacman -S nut"
+    exit 1
+fi
+
+if ! getent group nut &> /dev/null; then
+    echo "ERROR: nut group not found (expected from the nut package)"
+    exit 1
+fi
+
+if ! getent passwd nut &> /dev/null; then
+    echo "ERROR: nut user not found (expected from the nut package)"
+    exit 1
+fi
+
+if ! command -v bc &> /dev/null; then
+    echo "ERROR: bc not installed. Install with: pacman -S bc"
     exit 1
 fi
 
@@ -56,12 +71,13 @@ install -Dm755 nut-to-fakebattery.sh /usr/bin/nut-to-fakebattery
 echo "Installing systemd service..."
 install -Dm644 fake-battery-nut.service /etc/systemd/system/fake-battery-nut.service
 
-# Set permissions on device
+# Restrict control device to root and the nut group (daemon runs as nut)
 echo "Setting up udev rule..."
 cat > /etc/udev/rules.d/99-fake-battery-nut.rules << 'EOF'
-KERNEL=="fake_battery_nut", MODE="0666"
+KERNEL=="fake_battery_nut", GROUP="nut", MODE="0660"
 EOF
 udevadm control --reload-rules
+udevadm trigger --name-match=fake_battery_nut 2>/dev/null || true
 
 # Reload systemd and enable service
 systemctl daemon-reload
@@ -70,12 +86,14 @@ systemctl enable fake-battery-nut
 echo ""
 echo "=== Installation complete ==="
 echo ""
-echo "To configure your UPS, edit /etc/systemd/system/fake-battery-nut.service"
-echo "and change NUT_UPS=yourups@localhost"
+echo "To configure your UPS:"
+echo "  sudo systemctl edit fake-battery-nut"
+echo "  # [Service]"
+echo "  # Environment=NUT_UPS=yourups@host"
 echo ""
 echo "Then start the service:"
 echo "  sudo systemctl start fake-battery-nut"
 echo ""
 echo "Check status:"
 echo "  cat /sys/class/power_supply/BAT0/capacity"
-echo "  cat /sys/class/power_supply/BAT1/capacity"
+echo "  cat /sys/class/power_supply/AC0/online"

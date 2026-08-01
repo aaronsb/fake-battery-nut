@@ -5,10 +5,10 @@ pkgname=fake-battery-nut-dkms
 # packaging convention, not the project's name — so the tarball extracts to
 # fake-battery-nut-$pkgver.
 _repo=fake-battery-nut
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="Bridge NUT UPS data to UPower/desktop - makes any UPS look like a laptop battery"
-arch=('x86_64')
+arch=('any')
 url="https://github.com/aaronsb/fake-battery-nut"
 license=('GPL-2.0-or-later')
 depends=('dkms' 'nut' 'bc')
@@ -34,6 +34,6 @@ package() {
     # Module autoload
     install -Dm644 /dev/stdin "${pkgdir}/usr/lib/modules-load.d/fake-battery-nut.conf" <<< "fake_battery_nut"
 
-    # Udev rule for device permissions
-    install -Dm644 /dev/stdin "${pkgdir}/usr/lib/udev/rules.d/99-fake-battery-nut.rules" <<< 'KERNEL=="fake_battery_nut", MODE="0666"'
+    # Udev rule: writable only by root and the nut group (daemon runs as nut)
+    install -Dm644 /dev/stdin "${pkgdir}/usr/lib/udev/rules.d/99-fake-battery-nut.rules" <<< 'KERNEL=="fake_battery_nut", GROUP="nut", MODE="0660"'
 }

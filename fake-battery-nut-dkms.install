@@ -8,7 +8,8 @@ post_install() {
 
     echo ""
     echo ">>> fake-battery-nut is now active!"
-    echo ">>> Configure your UPS name in: /usr/lib/systemd/system/fake-battery-nut.service"
+    echo ">>> Configure your UPS name with: systemctl edit fake-battery-nut"
+    echo ">>> Example: Environment=NUT_UPS=myups@hostname"
     echo ">>> Default is: cyberpower@localhost"
 }
 
@@ -32,4 +33,7 @@ pre_remove() {
 
     echo ">>> Removing DKMS module..."
     dkms remove fake-battery-nut --all 2>/dev/null || true
+
+    # Drop-ins from `systemctl edit` are not owned by the package.
+    rm -rf /etc/systemd/system/fake-battery-nut.service.d
 }
