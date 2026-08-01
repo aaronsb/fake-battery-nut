@@ -116,6 +116,74 @@ map_technology() {
     esac
 }
 
+# Map ups.status tokens to POWER_SUPPLY_HEALTH_*.
+# Default GOOD when no fault tokens are present.
+map_health() {
+    local st="$1"
+
+    if status_has RB "$st"; then
+        printf '3'   # DEAD — replace battery
+    elif status_has OVER "$st"; then
+        printf '8'   # OVERCURRENT — overload
+    elif status_has CAL "$st"; then
+        printf '9'   # CALIBRATION_REQUIRED
+    else
+        printf '1'   # GOOD
+    fi
+}
+
+# Convert a NUT voltage/float string to microvolts (integer), or empty.
+volts_to_uv() {
+    local raw="$1"
+    local uv
+
+    if [[ ! "$raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        return 1
+    fi
+    uv=$(printf '%s\n' "$raw * 1000000" | bc | cut -d. -f1)
+    clamp_nonneg_int "$(int_field "$uv")"
+}
+
+# Approximate load power in microwatts: load% * realpower.nominal * 1e4.
+# Empty if either input is missing/unusable.
+power_now_uw() {
+    local load="$1"
+    local nominal_w="$2"
+    local uw
+
+    load=$(int_field "$load")
+    nominal_w=$(int_field "$nominal_w")
+    [ -n "$load" ] && [ -n "$nominal_w" ] || return 1
+    [ "$load" -ge 0 ] 2>/dev/null && [ "$load" -le 100 ] 2>/dev/null || return 1
+
+    uw=$(printf '%s\n' "$load * $nominal_w * 10000" | bc | cut -d. -f1)
+    clamp_nonneg_int "$(int_field "$uw")"
+}
+
+# Parse NUT date (YYYY/MM/DD or YYYY-MM-DD) into year month day on stdout.
+# Prints nothing and fails if unusable (caller keeps kernel defaults).
+parse_mfr_date() {
+    local raw="$1"
+    local y m d
+
+    raw=$(printf '%s' "$raw" | tr -cd '0-9/-')
+    if [[ "$raw" =~ ^([0-9]{4})[/-]([0-9]{1,2})[/-]([0-9]{1,2})$ ]]; then
+        y="${BASH_REMATCH[1]}"
+        m="${BASH_REMATCH[2]}"
+        d="${BASH_REMATCH[3]}"
+        # Strip leading zeros for decimal arithmetic safety.
+        m=$((10#$m))
+        d=$((10#$d))
+        if [ "$y" -ge 1980 ] 2>/dev/null && [ "$y" -le 9999 ] 2>/dev/null && \
+           [ "$m" -ge 1 ] 2>/dev/null && [ "$m" -le 12 ] 2>/dev/null && \
+           [ "$d" -ge 1 ] 2>/dev/null && [ "$d" -le 31 ] 2>/dev/null; then
+            printf '%s %s %s' "$y" "$m" "$d"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # True if haystack contains needle as a whole whitespace-delimited token.
 # Avoids DISCHRG falsely matching CHRG.
 status_has() {
@@ -199,16 +267,23 @@ while true; do
                 enter_failsafe "ups.status missing"
             fi
         else
-            VOLTAGE_UV=
-            if [[ "$VOLTAGE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-                VOLTAGE_UV=$(printf '%s\n' "$VOLTAGE * 1000000" | bc | cut -d. -f1)
-                VOLTAGE_UV=$(clamp_nonneg_int "$(int_field "$VOLTAGE_UV")")
-            fi
+            VOLTAGE_UV=$(volts_to_uv "$VOLTAGE" || true)
+            VOLTAGE_MAX_UV=$(volts_to_uv "$(nut_get battery.voltage.nominal)" || true)
+            VOLTAGE_MIN_UV=$(volts_to_uv "$(nut_get_first battery.voltage.low battery.voltage.minimum)" || true)
+            AC_VOLTAGE_UV=$(volts_to_uv "$(nut_get input.voltage)" || true)
+            ALERT_MIN=$(clamp_capacity "$(int_field "$(nut_get battery.charge.low)")")
+            POWER_NOW=$(power_now_uw "$(nut_get ups.load)" "$(nut_get ups.realpower.nominal)" || true)
 
             MANUFACTURER=$(sanitize_string_prop "$(nut_get_first device.mfr ups.mfr)" || true)
             MODEL=$(sanitize_string_prop "$(nut_get_first device.model ups.model)" || true)
             SERIAL=$(sanitize_string_prop "$(nut_get_first device.serial ups.serial)" || true)
             TECHNOLOGY=$(map_technology "$(nut_get battery.type)" || true)
+            HEALTH=$(map_health "$STATUS")
+
+            MFR_YEAR= MFR_MONTH= MFR_DAY=
+            if MFR_DATE=$(parse_mfr_date "$(nut_get_first battery.mfr.date ups.mfr.date)"); then
+                read -r MFR_YEAR MFR_MONTH MFR_DAY <<< "$MFR_DATE"
+            fi
 
             # status: 0=discharging, 1=charging, 2=full, 3=not charging
             # NOCOMM = data path lost; do not keep reporting online/full.
@@ -226,14 +301,23 @@ while true; do
                 STATUS_VAL=3
             fi
 
-            # Identity fields in a separate quiet write: older modules reject
-            # unknown keys with EINVAL and would abort a combined payload.
-            if [ -n "${MANUFACTURER}${MODEL}${SERIAL}${TECHNOLOGY}" ]; then
+            # Optional / identity fields in a separate quiet write: older modules
+            # reject unknown keys with EINVAL and would abort a combined payload.
+            if [ -n "${MANUFACTURER}${MODEL}${SERIAL}${TECHNOLOGY}${HEALTH}${ALERT_MIN}${POWER_NOW}${VOLTAGE_MAX_UV}${VOLTAGE_MIN_UV}${AC_VOLTAGE_UV}${MFR_YEAR}" ]; then
                 {
                     [ -n "$MANUFACTURER" ] && echo "manufacturer=$MANUFACTURER"
                     [ -n "$MODEL" ] && echo "model=$MODEL"
                     [ -n "$SERIAL" ] && echo "serial=$SERIAL"
                     [ -n "$TECHNOLOGY" ] && echo "technology=$TECHNOLOGY"
+                    [ -n "$HEALTH" ] && echo "health=$HEALTH"
+                    [ -n "$ALERT_MIN" ] && echo "capacity_alert_min=$ALERT_MIN"
+                    [ -n "$POWER_NOW" ] && echo "power_now=$POWER_NOW"
+                    [ -n "$VOLTAGE_MAX_UV" ] && echo "voltage_max_design=$VOLTAGE_MAX_UV"
+                    [ -n "$VOLTAGE_MIN_UV" ] && echo "voltage_min_design=$VOLTAGE_MIN_UV"
+                    [ -n "$AC_VOLTAGE_UV" ] && echo "ac_voltage=$AC_VOLTAGE_UV"
+                    [ -n "$MFR_YEAR" ] && echo "manufacture_year=$MFR_YEAR"
+                    [ -n "$MFR_MONTH" ] && echo "manufacture_month=$MFR_MONTH"
+                    [ -n "$MFR_DAY" ] && echo "manufacture_day=$MFR_DAY"
                 } | write_device -q || true
             fi
 

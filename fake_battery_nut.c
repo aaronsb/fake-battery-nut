@@ -6,16 +6,25 @@
  *
  * Control interface: /dev/fake_battery_nut
  * Commands:
- *   capacity=N       - Set battery capacity (0-100) - maps to UPS battery charge
- *   time=N           - Set time_to_empty in seconds - maps to UPS runtime
- *   voltage=N        - Set voltage in microvolts
- *   temp=N           - Set temperature in tenths of °C (e.g., 260 = 26.0°C)
- *   status=N         - Set status (0=discharging, 1=charging, 2=full, 3=not charging)
- *   charging=N       - Set AC online status (0=offline, 1=online)
- *   manufacturer=S   - Set manufacturer string
- *   model=S          - Set model name string
- *   serial=S         - Set serial number string
- *   technology=N     - Set technology (0=Unknown .. 6=LiMn)
+ *   capacity=N            - Set battery capacity (0-100) - maps to UPS battery charge
+ *   time=N                - Set time_to_empty in seconds - maps to UPS runtime
+ *   voltage=N             - Set voltage in microvolts
+ *   voltage_max_design=N  - Set design max voltage in microvolts
+ *   voltage_min_design=N  - Set design min voltage in microvolts
+ *   temp=N                - Set temperature in tenths of °C (e.g., 260 = 26.0°C)
+ *   status=N              - Set status (0=discharging, 1=charging, 2=full, 3=not charging)
+ *   charging=N            - Set AC online status (0=offline, 1=online)
+ *   ac_voltage=N          - Set AC input voltage in microvolts
+ *   manufacturer=S        - Set manufacturer string
+ *   model=S               - Set model name string
+ *   serial=S              - Set serial number string
+ *   technology=N          - Set technology (0=Unknown .. 6=LiMn)
+ *   health=N              - Set health (power_supply health enum)
+ *   capacity_alert_min=N  - Set low-capacity alert threshold (0-100%)
+ *   power_now=N           - Set instantaneous power in microwatts
+ *   manufacture_year=N    - Set manufacture year (0=unknown)
+ *   manufacture_month=N   - Set manufacture month (0=unknown, 1-12)
+ *   manufacture_day=N     - Set manufacture day (0=unknown, 1-31)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,10 +59,18 @@ static struct battery_status {
     int status;
     int capacity_level;
     int capacity;
+    int capacity_alert_min;
     int time_left;
     int voltage;
+    int voltage_max_design;
+    int voltage_min_design;
+    int power_now;
     int temp;
     int technology;
+    int health;
+    int manufacture_year;
+    int manufacture_month;
+    int manufacture_day;
     char manufacturer[FAKE_STRING_PROP_LEN];
     char model_name[FAKE_STRING_PROP_LEN];
     char serial_number[FAKE_STRING_PROP_LEN];
@@ -61,16 +78,25 @@ static struct battery_status {
     .status = POWER_SUPPLY_STATUS_FULL,
     .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
     .capacity = 100,
+    .capacity_alert_min = 15,
     .time_left = 3600,
-    .voltage = 24000000,  /* 24V in microvolts */
-    .temp = 260,          /* 26.0°C in tenths */
+    .voltage = 24000000,            /* 24V in microvolts */
+    .voltage_max_design = 24000000, /* match typical 24V UPS pack */
+    .voltage_min_design = 0,        /* unknown until NUT provides it */
+    .power_now = 0,
+    .temp = 260,                    /* 26.0°C in tenths */
     .technology = POWER_SUPPLY_TECHNOLOGY_LION,
+    .health = POWER_SUPPLY_HEALTH_GOOD,
+    .manufacture_year = 0,
+    .manufacture_month = 0,
+    .manufacture_day = 0,
     .manufacturer = "NUT",
     .model_name = "UPS Battery",
     .serial_number = "NUT-UPS",
 };
 
 static int ac_status = 1;
+static int ac_voltage; /* µV; 0 = unknown */
 
 static DEFINE_MUTEX(status_lock);
 
@@ -101,6 +127,7 @@ static enum power_supply_property fake_battery_properties[] = {
     POWER_SUPPLY_PROP_CHARGE_NOW,
     POWER_SUPPLY_PROP_CAPACITY,
     POWER_SUPPLY_PROP_CAPACITY_LEVEL,
+    POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
     POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
     POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
     POWER_SUPPLY_PROP_MODEL_NAME,
@@ -108,10 +135,18 @@ static enum power_supply_property fake_battery_properties[] = {
     POWER_SUPPLY_PROP_SERIAL_NUMBER,
     POWER_SUPPLY_PROP_TEMP,
     POWER_SUPPLY_PROP_VOLTAGE_NOW,
+    POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN,
+    POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
+    POWER_SUPPLY_PROP_POWER_NOW,
+    POWER_SUPPLY_PROP_MANUFACTURE_YEAR,
+    POWER_SUPPLY_PROP_MANUFACTURE_MONTH,
+    POWER_SUPPLY_PROP_MANUFACTURE_DAY,
+    POWER_SUPPLY_PROP_SCOPE,
 };
 
 static enum power_supply_property fake_ac_properties[] = {
     POWER_SUPPLY_PROP_ONLINE,
+    POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
 
 static struct power_supply_desc descriptions[] = {
@@ -153,8 +188,11 @@ static ssize_t
 control_device_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
     static char *message =
-        "fake_battery_nut: capacity, time, voltage, temp, status, charging, "
-        "manufacturer, model, serial, technology\n";
+        "fake_battery_nut: capacity, time, voltage, voltage_max_design, "
+        "voltage_min_design, temp, status, charging, ac_voltage, "
+        "manufacturer, model, serial, technology, health, "
+        "capacity_alert_min, power_now, manufacture_year, "
+        "manufacture_month, manufacture_day\n";
     size_t message_len = strlen(message);
 
     (void)file;
@@ -252,7 +290,8 @@ parse_int_value(const char *value_p, long *value)
 }
 
 static int
-handle_control_line(const char *line, int *ac_online, struct battery_status *battery)
+handle_control_line(const char *line, int *ac_online, int *ac_volt,
+                    struct battery_status *battery)
 {
     const char *eq;
     const char *value_p;
@@ -304,6 +343,11 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
         } else {
             battery->capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
         }
+    } else if(key_matches(line, eq, "capacity_alert_min")) {
+        if(value < 0 || value > 100) {
+            return -EINVAL;
+        }
+        battery->capacity_alert_min = (int)value;
     } else if(key_matches(line, eq, "time")) {
         if(value < 0 || value > INT_MAX) {
             return -EINVAL;
@@ -314,6 +358,21 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
             return -EINVAL;
         }
         battery->voltage = (int)value;
+    } else if(key_matches(line, eq, "voltage_max_design")) {
+        if(value < 0 || value > INT_MAX) {
+            return -EINVAL;
+        }
+        battery->voltage_max_design = (int)value;
+    } else if(key_matches(line, eq, "voltage_min_design")) {
+        if(value < 0 || value > INT_MAX) {
+            return -EINVAL;
+        }
+        battery->voltage_min_design = (int)value;
+    } else if(key_matches(line, eq, "power_now")) {
+        if(value < 0 || value > INT_MAX) {
+            return -EINVAL;
+        }
+        battery->power_now = (int)value;
     } else if(key_matches(line, eq, "temp")) {
         /* Tenths of °C; allow a wide but finite sensor range */
         if(value < -400 || value > 2000) {
@@ -342,6 +401,11 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
             return -EINVAL;
         }
         *ac_online = (int)value;
+    } else if(key_matches(line, eq, "ac_voltage")) {
+        if(value < 0 || value > INT_MAX) {
+            return -EINVAL;
+        }
+        *ac_volt = (int)value;
     } else if(key_matches(line, eq, "technology")) {
         switch(value) {
             case POWER_SUPPLY_TECHNOLOGY_UNKNOWN:
@@ -356,6 +420,39 @@ handle_control_line(const char *line, int *ac_online, struct battery_status *bat
             default:
                 return -EINVAL;
         }
+    } else if(key_matches(line, eq, "health")) {
+        switch(value) {
+            case POWER_SUPPLY_HEALTH_UNKNOWN:
+            case POWER_SUPPLY_HEALTH_GOOD:
+            case POWER_SUPPLY_HEALTH_OVERHEAT:
+            case POWER_SUPPLY_HEALTH_DEAD:
+            case POWER_SUPPLY_HEALTH_OVERVOLTAGE:
+            case POWER_SUPPLY_HEALTH_UNSPEC_FAILURE:
+            case POWER_SUPPLY_HEALTH_COLD:
+            case POWER_SUPPLY_HEALTH_WATCHDOG_TIMER_EXPIRE:
+            case POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE:
+            case POWER_SUPPLY_HEALTH_OVERCURRENT:
+            case POWER_SUPPLY_HEALTH_CALIBRATION_REQUIRED:
+                battery->health = (int)value;
+                break;
+            default:
+                return -EINVAL;
+        }
+    } else if(key_matches(line, eq, "manufacture_year")) {
+        if(value < 0 || value > 9999) {
+            return -EINVAL;
+        }
+        battery->manufacture_year = (int)value;
+    } else if(key_matches(line, eq, "manufacture_month")) {
+        if(value < 0 || value > 12) {
+            return -EINVAL;
+        }
+        battery->manufacture_month = (int)value;
+    } else if(key_matches(line, eq, "manufacture_day")) {
+        if(value < 0 || value > 31) {
+            return -EINVAL;
+        }
+        battery->manufacture_day = (int)value;
     } else {
         return -EINVAL;
     }
@@ -405,7 +502,7 @@ control_device_write(struct file *file, const char *buffer, size_t count, loff_t
             strip_trailing_cr(buffer_cursor);
             if(!line_is_blank(buffer_cursor)) {
                 status = handle_control_line(buffer_cursor, &ac_status,
-                                             &fake_battery_status);
+                                             &ac_voltage, &fake_battery_status);
                 if(status) {
                     mutex_unlock(&status_lock);
                     if(updated) {
@@ -422,7 +519,7 @@ control_device_write(struct file *file, const char *buffer, size_t count, loff_t
             strip_trailing_cr(buffer_cursor);
             if(!line_is_blank(buffer_cursor)) {
                 status = handle_control_line(buffer_cursor, &ac_status,
-                                             &fake_battery_status);
+                                             &ac_voltage, &fake_battery_status);
                 if(status) {
                     mutex_unlock(&status_lock);
                     if(updated) {
@@ -486,7 +583,7 @@ fake_battery_get_property(struct power_supply *psy,
             val->intval = POWER_SUPPLY_CHARGE_TYPE_FAST;
             break;
         case POWER_SUPPLY_PROP_HEALTH:
-            val->intval = POWER_SUPPLY_HEALTH_GOOD;
+            val->intval = status.health;
             break;
         case POWER_SUPPLY_PROP_PRESENT:
             val->intval = 1;
@@ -494,12 +591,18 @@ fake_battery_get_property(struct power_supply *psy,
         case POWER_SUPPLY_PROP_TECHNOLOGY:
             val->intval = status.technology;
             break;
+        case POWER_SUPPLY_PROP_SCOPE:
+            val->intval = POWER_SUPPLY_SCOPE_SYSTEM;
+            break;
         case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
             val->intval = status.capacity_level;
             break;
         case POWER_SUPPLY_PROP_CAPACITY:
         case POWER_SUPPLY_PROP_CHARGE_NOW:
             val->intval = status.capacity;
+            break;
+        case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
+            val->intval = status.capacity_alert_min;
             break;
         case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
         case POWER_SUPPLY_PROP_CHARGE_FULL:
@@ -525,6 +628,24 @@ fake_battery_get_property(struct power_supply *psy,
         case POWER_SUPPLY_PROP_VOLTAGE_NOW:
             val->intval = status.voltage;
             break;
+        case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+            val->intval = status.voltage_max_design;
+            break;
+        case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
+            val->intval = status.voltage_min_design;
+            break;
+        case POWER_SUPPLY_PROP_POWER_NOW:
+            val->intval = status.power_now;
+            break;
+        case POWER_SUPPLY_PROP_MANUFACTURE_YEAR:
+            val->intval = status.manufacture_year;
+            break;
+        case POWER_SUPPLY_PROP_MANUFACTURE_MONTH:
+            val->intval = status.manufacture_month;
+            break;
+        case POWER_SUPPLY_PROP_MANUFACTURE_DAY:
+            val->intval = status.manufacture_day;
+            break;
         default:
             ret = -EINVAL;
             break;
@@ -539,6 +660,7 @@ fake_ac_get_property(struct power_supply *psy,
         union power_supply_propval *val)
 {
     int online;
+    int voltage;
 
     switch (psp) {
     case POWER_SUPPLY_PROP_ONLINE:
@@ -546,6 +668,12 @@ fake_ac_get_property(struct power_supply *psy,
             online = ac_status;
             mutex_unlock(&status_lock);
             val->intval = online;
+            break;
+    case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+            mutex_lock(&status_lock);
+            voltage = ac_voltage;
+            mutex_unlock(&status_lock);
+            val->intval = voltage;
             break;
     default:
             return -EINVAL;
