@@ -21,6 +21,7 @@
  *   technology=N          - Set technology (0=Unknown .. 6=LiMn)
  *   health=N              - Set health (power_supply health enum)
  *   capacity_alert_min=N  - Set low-capacity alert threshold (0-100%)
+ *   charge_full=N         - Set full/design charge in microamp-hours
  *   power_now=N           - Set instantaneous power in microwatts
  *   manufacture_year=N    - Set manufacture year (0=unknown)
  *   manufacture_month=N   - Set manufacture month (0=unknown, 1-12)
@@ -36,6 +37,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
+#include <linux/math64.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -54,12 +56,18 @@ fake_ac_get_property(struct power_supply *psy,
         union power_supply_propval *val);
 
 #define FAKE_STRING_PROP_LEN 64
+/*
+ * Default full charge in µAh (9 Ah). Typical for small consumer UPS packs;
+ * override at runtime via charge_full= (daemon: BATTERY_CAPACITY_AH).
+ */
+#define FAKE_CHARGE_FULL_UAH_DEFAULT (9 * 1000000)
 
 static struct battery_status {
     int status;
     int capacity_level;
     int capacity;
     int capacity_alert_min;
+    int charge_full; /* µAh; design and current-full use the same value */
     int time_left;
     int voltage;
     int voltage_max_design;
@@ -79,10 +87,13 @@ static struct battery_status {
     .capacity_level = POWER_SUPPLY_CAPACITY_LEVEL_FULL,
     .capacity = 100,
     .capacity_alert_min = 15,
+    .charge_full = FAKE_CHARGE_FULL_UAH_DEFAULT,
     .time_left = 3600,
     .voltage = 24000000,            /* 24V in microvolts */
     .voltage_max_design = 24000000, /* match typical 24V UPS pack */
-    .voltage_min_design = 0,        /* unknown until NUT provides it */
+    /* Must be non-zero: UPower estimates Wh as charge*voltage_min_design,
+     * so 0 here makes Capacity (battery health %) report as 0. */
+    .voltage_min_design = 24000000,
     .power_now = 0,
     .temp = 260,                    /* 26.0°C in tenths */
     .technology = POWER_SUPPLY_TECHNOLOGY_LION,
@@ -125,6 +136,9 @@ static enum power_supply_property fake_battery_properties[] = {
     POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
     POWER_SUPPLY_PROP_CHARGE_FULL,
     POWER_SUPPLY_PROP_CHARGE_NOW,
+    POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
+    POWER_SUPPLY_PROP_ENERGY_FULL,
+    POWER_SUPPLY_PROP_ENERGY_NOW,
     POWER_SUPPLY_PROP_CAPACITY,
     POWER_SUPPLY_PROP_CAPACITY_LEVEL,
     POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
@@ -191,7 +205,7 @@ control_device_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
         "fake_battery_nut: capacity, time, voltage, voltage_max_design, "
         "voltage_min_design, temp, status, charging, ac_voltage, "
         "manufacturer, model, serial, technology, health, "
-        "capacity_alert_min, power_now, manufacture_year, "
+        "capacity_alert_min, charge_full, power_now, manufacture_year, "
         "manufacture_month, manufacture_day\n";
     size_t message_len = strlen(message);
 
@@ -289,6 +303,28 @@ parse_int_value(const char *value_p, long *value)
     return kstrtol(number, 10, value);
 }
 
+/* µWh = µAh * µV / 1e6; clamp to INT_MAX for power_supply intval. */
+static int
+charge_voltage_to_uwh(int charge_uah, int voltage_uv)
+{
+    u64 uwh;
+
+    if(charge_uah <= 0 || voltage_uv <= 0) {
+        return 0;
+    }
+    uwh = div_u64((u64)charge_uah * (u64)voltage_uv, 1000000ULL);
+    if(uwh > (u64)INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)uwh;
+}
+
+static int
+charge_now_uah(const struct battery_status *battery)
+{
+    return (int)div_u64((u64)battery->capacity * (u64)battery->charge_full, 100ULL);
+}
+
 static int
 handle_control_line(const char *line, int *ac_online, int *ac_volt,
                     struct battery_status *battery)
@@ -348,6 +384,12 @@ handle_control_line(const char *line, int *ac_online, int *ac_volt,
             return -EINVAL;
         }
         battery->capacity_alert_min = (int)value;
+    } else if(key_matches(line, eq, "charge_full")) {
+        /* µAh; must yield >0.01 Wh at design voltage for UPower health. */
+        if(value < 1 || value > INT_MAX) {
+            return -EINVAL;
+        }
+        battery->charge_full = (int)value;
     } else if(key_matches(line, eq, "time")) {
         if(value < 0 || value > INT_MAX) {
             return -EINVAL;
@@ -598,15 +640,27 @@ fake_battery_get_property(struct power_supply *psy,
             val->intval = status.capacity_level;
             break;
         case POWER_SUPPLY_PROP_CAPACITY:
-        case POWER_SUPPLY_PROP_CHARGE_NOW:
             val->intval = status.capacity;
             break;
         case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
             val->intval = status.capacity_alert_min;
             break;
+        case POWER_SUPPLY_PROP_CHARGE_NOW:
+            val->intval = charge_now_uah(&status);
+            break;
         case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
         case POWER_SUPPLY_PROP_CHARGE_FULL:
-            val->intval = 100;
+            val->intval = status.charge_full;
+            break;
+        case POWER_SUPPLY_PROP_ENERGY_NOW:
+            val->intval = charge_voltage_to_uwh(charge_now_uah(&status),
+                                               status.voltage_max_design);
+            break;
+        case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN:
+        case POWER_SUPPLY_PROP_ENERGY_FULL:
+            /* Prefer ENERGY_* so UPower Capacity/health bypasses charge quirks. */
+            val->intval = charge_voltage_to_uwh(status.charge_full,
+                                               status.voltage_max_design);
             break;
         case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG:
             if(status.status == POWER_SUPPLY_STATUS_DISCHARGING) {
@@ -632,7 +686,10 @@ fake_battery_get_property(struct power_supply *psy,
             val->intval = status.voltage_max_design;
             break;
         case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
-            val->intval = status.voltage_min_design;
+            /* Never expose 0 — see voltage_min_design default comment. */
+            val->intval = status.voltage_min_design
+                    ? status.voltage_min_design
+                    : status.voltage_max_design;
             break;
         case POWER_SUPPLY_PROP_POWER_NOW:
             val->intval = status.power_now;

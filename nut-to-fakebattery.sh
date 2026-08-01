@@ -7,6 +7,8 @@
 
 DEVICE="/dev/fake_battery_nut"
 UPS="${NUT_UPS:-cyberpower@localhost}"
+# Pack capacity in amp-hours (written to the module as µAh).
+BATTERY_CAPACITY_AH="${BATTERY_CAPACITY_AH:-9}"
 # After this many consecutive failed upsc polls, mark AC offline so desktops
 # do not keep trusting a stale "online/full" reading during an outage.
 MAX_FAILURES=3
@@ -245,6 +247,26 @@ done
 
 log "Starting NUT to fake_battery_nut bridge for $UPS"
 
+# Validate Ah and convert once to µAh for the control interface.
+CHARGE_FULL_UAH=
+if [[ "$BATTERY_CAPACITY_AH" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    AH_INT=$(int_field "$BATTERY_CAPACITY_AH")
+    if [ -n "$AH_INT" ] && [ "$AH_INT" -ge 1 ] 2>/dev/null; then
+        # µAh = Ah * 1e6; clamp so the product fits a signed 32-bit control value.
+        MAX_AH=$((INT_MAX / 1000000))
+        if [ "$AH_INT" -gt "$MAX_AH" ]; then
+            log "BATTERY_CAPACITY_AH=$AH_INT exceeds max ${MAX_AH} Ah; clamping"
+            AH_INT=$MAX_AH
+        fi
+        CHARGE_FULL_UAH=$((AH_INT * 1000000))
+        log "Battery pack capacity ${AH_INT} Ah (${CHARGE_FULL_UAH} uAh)"
+    fi
+fi
+if [ -z "$CHARGE_FULL_UAH" ]; then
+    log "Invalid BATTERY_CAPACITY_AH='$BATTERY_CAPACITY_AH'; using 9 Ah"
+    CHARGE_FULL_UAH=$((9 * 1000000))
+fi
+
 fail_count=0
 in_failsafe=0
 
@@ -270,6 +292,10 @@ while true; do
             VOLTAGE_UV=$(volts_to_uv "$VOLTAGE" || true)
             VOLTAGE_MAX_UV=$(volts_to_uv "$(nut_get battery.voltage.nominal)" || true)
             VOLTAGE_MIN_UV=$(volts_to_uv "$(nut_get_first battery.voltage.low battery.voltage.minimum)" || true)
+            # If NUT only gives nominal, keep min==max so UPower health stays 100%.
+            if [ -n "$VOLTAGE_MAX_UV" ] && [ -z "$VOLTAGE_MIN_UV" ]; then
+                VOLTAGE_MIN_UV=$VOLTAGE_MAX_UV
+            fi
             AC_VOLTAGE_UV=$(volts_to_uv "$(nut_get input.voltage)" || true)
             ALERT_MIN=$(clamp_capacity "$(int_field "$(nut_get battery.charge.low)")")
             POWER_NOW=$(power_now_uw "$(nut_get ups.load)" "$(nut_get ups.realpower.nominal)" || true)
@@ -303,7 +329,7 @@ while true; do
 
             # Optional / identity fields in a separate quiet write: older modules
             # reject unknown keys with EINVAL and would abort a combined payload.
-            if [ -n "${MANUFACTURER}${MODEL}${SERIAL}${TECHNOLOGY}${HEALTH}${ALERT_MIN}${POWER_NOW}${VOLTAGE_MAX_UV}${VOLTAGE_MIN_UV}${AC_VOLTAGE_UV}${MFR_YEAR}" ]; then
+            if [ -n "${MANUFACTURER}${MODEL}${SERIAL}${TECHNOLOGY}${HEALTH}${ALERT_MIN}${POWER_NOW}${VOLTAGE_MAX_UV}${VOLTAGE_MIN_UV}${AC_VOLTAGE_UV}${MFR_YEAR}${CHARGE_FULL_UAH}" ]; then
                 {
                     [ -n "$MANUFACTURER" ] && echo "manufacturer=$MANUFACTURER"
                     [ -n "$MODEL" ] && echo "model=$MODEL"
@@ -311,6 +337,7 @@ while true; do
                     [ -n "$TECHNOLOGY" ] && echo "technology=$TECHNOLOGY"
                     [ -n "$HEALTH" ] && echo "health=$HEALTH"
                     [ -n "$ALERT_MIN" ] && echo "capacity_alert_min=$ALERT_MIN"
+                    [ -n "$CHARGE_FULL_UAH" ] && echo "charge_full=$CHARGE_FULL_UAH"
                     [ -n "$POWER_NOW" ] && echo "power_now=$POWER_NOW"
                     [ -n "$VOLTAGE_MAX_UV" ] && echo "voltage_max_design=$VOLTAGE_MAX_UV"
                     [ -n "$VOLTAGE_MIN_UV" ] && echo "voltage_min_design=$VOLTAGE_MIN_UV"
