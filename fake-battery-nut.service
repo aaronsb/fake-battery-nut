@@ -15,6 +15,8 @@ Group=nut
 Environment=NUT_UPS=cyberpower@localhost
 # Pack size in amp-hours (default 9). Override for your UPS chemistry/size.
 # Environment=BATTERY_CAPACITY_AH=9
+# Scale power_now for UPower's 300 W energy-rate limit (e.g. 10 → 540 W shows as 54 W).
+# Environment=POWER_NOW_DIVIDER=10
 ExecStart=/usr/bin/nut-to-fakebattery
 Restart=on-failure
 RestartSec=5

@@ -9,6 +9,9 @@ DEVICE="/dev/fake_battery_nut"
 UPS="${NUT_UPS:-cyberpower@localhost}"
 # Pack capacity in amp-hours (written to the module as µAh).
 BATTERY_CAPACITY_AH="${BATTERY_CAPACITY_AH:-9}"
+# Scale reported power_now for UPower/Plasma. UPower hides energy-rate above
+# 300 W; set e.g. 10 so a 540 W load appears as 54 W (still proportional).
+POWER_NOW_DIVIDER="${POWER_NOW_DIVIDER:-1}"
 # After this many consecutive failed upsc polls, mark AC offline so desktops
 # do not keep trusting a stale "online/full" reading during an outage.
 MAX_FAILURES=3
@@ -148,10 +151,17 @@ volts_to_uv() {
 
 # Approximate load power in microwatts: load% * realpower.nominal * 1e4.
 # Empty if either input is missing/unusable.
+#
+# UPower discards energy-rate above 300 W as a "weird measurement" quirk
+# (aimed at laptop batteries), which makes Plasma hide Consumption entirely.
+# Apply POWER_NOW_DIVIDER first (proportional scale), then cap at 300 W.
+UPOWER_MAX_POWER_UW=300000000
+
 power_now_uw() {
     local load="$1"
     local nominal_w="$2"
     local uw
+    local div
 
     load=$(int_field "$load")
     nominal_w=$(int_field "$nominal_w")
@@ -159,7 +169,21 @@ power_now_uw() {
     [ "$load" -ge 0 ] 2>/dev/null && [ "$load" -le 100 ] 2>/dev/null || return 1
 
     uw=$(printf '%s\n' "$load * $nominal_w * 10000" | bc | cut -d. -f1)
-    clamp_nonneg_int "$(int_field "$uw")"
+    uw=$(clamp_nonneg_int "$(int_field "$uw")")
+    [ -n "$uw" ] || return 1
+
+    div=$(int_field "$POWER_NOW_DIVIDER")
+    if [ -z "$div" ] || [ "$div" -lt 1 ] 2>/dev/null; then
+        div=1
+    fi
+    if [ "$div" -gt 1 ] 2>/dev/null; then
+        uw=$((uw / div))
+    fi
+
+    if [ "$uw" -gt "$UPOWER_MAX_POWER_UW" ] 2>/dev/null; then
+        uw=$UPOWER_MAX_POWER_UW
+    fi
+    printf '%s' "$uw"
 }
 
 # Parse NUT date (YYYY/MM/DD or YYYY-MM-DD) into year month day on stdout.
@@ -266,6 +290,18 @@ if [ -z "$CHARGE_FULL_UAH" ]; then
     log "Invalid BATTERY_CAPACITY_AH='$BATTERY_CAPACITY_AH'; using 9 Ah"
     CHARGE_FULL_UAH=$((9 * 1000000))
 fi
+
+_div=$(int_field "$POWER_NOW_DIVIDER")
+if [ -z "$_div" ] || [ "$_div" -lt 1 ] 2>/dev/null; then
+    POWER_NOW_DIVIDER=1
+    log "Invalid POWER_NOW_DIVIDER; using 1 (no scaling)"
+elif [ "$_div" -gt 1 ] 2>/dev/null; then
+    POWER_NOW_DIVIDER=$_div
+    log "Scaling power_now by 1/${POWER_NOW_DIVIDER} for UPower (cap still 300 W)"
+else
+    POWER_NOW_DIVIDER=1
+fi
+unset _div
 
 fail_count=0
 in_failsafe=0
