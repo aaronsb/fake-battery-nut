@@ -77,3 +77,59 @@ cat /sys/class/power_supply/BAT1/capacity  # UPS load %
 3. btop is not extensible
 4. Kernel modules are surprisingly approachable
 5. Always document why, not just what
+
+## Releasing
+
+`aaronsb/arch-repo` publishes this project. It reads `./PKGBUILD` from the
+default branch, builds it in a clean container, lints with namcap, signs, and
+pushes to the AUR (`fake-battery-nut-dkms`) and the `[aaronsb]` pacman
+repository.
+
+```bash
+make package                          # clean-chroot build + namcap; fails on a namcap error
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin vX.Y.Z
+gh release create vX.Y.Z --generate-notes
+```
+
+Nothing here talks to the AUR. `publish-aur.sh` is gone: two writers to one AUR
+ref is how a PKGBUILD and its `.SRCINFO` drift apart.
+
+### Fields arch-repo owns
+
+It overwrites all four before publishing, so a value set here is only wrong
+until it does. Do not maintain them, and do not commit a `.SRCINFO` — the one
+that used to be tracked still declared `license = GPL2` long after the recipe
+said otherwise.
+
+| Field | Where it really comes from |
+|---|---|
+| `pkgver` | the newest published GitHub release |
+| `pkgrel` | arch-repo's count of how many times it packaged that release |
+| `sha256sums` | computed from the release artifact |
+| `.SRCINFO` | regenerated at publish |
+
+This project's own version lives in `dkms.conf` — `PACKAGE_VERSION`. Bump that
+when you release, and `make version` will report it.
+
+### A packaging fix needs no release
+
+Change the recipe on the default branch and push. arch-repo ships the
+difference as a `pkgrel` bump — `1.2.0-1` becomes `1.2.0-2`, resetting to `-1`
+at the next real release.
+
+This is safe for DKMS. `dkms.conf` is installed out of the extracted tarball,
+not the repository tree, so `v1.2.0`'s tarball already carries
+`PACKAGE_VERSION="1.2.0"` and it lands in `/usr/src/fake-battery-nut-1.2.0`
+where DKMS looks for it. A `pkgrel` bump leaves `pkgver` alone, so the directory
+and the file stay in agreement.
+
+### The module build lives in `Kbuild`, not `Makefile`
+
+`Kbuild` carries the `obj-m` line and is what `package()` installs into
+`/usr/src` for DKMS. `dkms.conf`'s `MAKE[0]` invokes kbuild with `M=<dir>`, and
+kbuild reads `Kbuild` before `Makefile` — which is what leaves this
+repository's `Makefile` free for developer and packaging targets that have no
+business in `/usr/src`.
+
+The full contract: https://github.com/aaronsb/arch-repo/blob/main/docs/packaging-contract.md
