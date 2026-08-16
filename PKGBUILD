@@ -1,6 +1,6 @@
 # Maintainer: Aaron Bockelie <aaronsb@gmail.com>
 pkgname=fake-battery-nut-dkms
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="Bridge NUT UPS data to UPower/desktop - makes any UPS look like a laptop battery"
 arch=('x86_64')
