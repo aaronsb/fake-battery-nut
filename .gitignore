@@ -20,3 +20,6 @@ pkg/
 src/
 *.tar.gz
 *.tar.zst
+
+# make package dry run
+/pkgbuild-check/
