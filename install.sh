@@ -74,7 +74,7 @@ fi
 echo "Installing DKMS module..."
 mkdir -p "$SRCDIR"
 cp fake_battery_nut.c "$SRCDIR/"
-cp Makefile "$SRCDIR/"
+cp Kbuild "$SRCDIR/"
 cp dkms.conf "$SRCDIR/"
 
 dkms remove -m "$DKMS_NAME" -v "$VERSION" --all 2>/dev/null || true
