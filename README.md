@@ -84,10 +84,10 @@ make
 sudo make install
 
 # Or use DKMS
-sudo cp -r . /usr/src/fake-battery-nut-1.1.0
-sudo dkms add fake-battery-nut/1.1.0
-sudo dkms build fake-battery-nut/1.1.0
-sudo dkms install fake-battery-nut/1.1.0
+sudo cp -r . /usr/src/fake-battery-nut-1.2.1
+sudo dkms add fake-battery-nut/1.2.1
+sudo dkms build fake-battery-nut/1.2.1
+sudo dkms install fake-battery-nut/1.2.1
 
 # Install daemon
 sudo install -m755 nut-to-fakebattery.sh /usr/bin/nut-to-fakebattery
@@ -100,22 +100,37 @@ sudo systemctl enable --now fake-battery-nut
 
 ## Configuration
 
-Edit `/etc/systemd/system/fake-battery-nut.service` to set your UPS:
+Edit the service environment to set your UPS (local or remote):
+
+```bash
+sudo systemctl edit fake-battery-nut
+```
 
 ```ini
+[Service]
 Environment=NUT_UPS=myups@localhost
+# Environment=NUT_UPS=ups@nut-server.example.com
+```
+
+The control device `/dev/fake_battery_nut` is mode `0660` and owned by group `nut`.
+The daemon runs as `User=nut` and is the intended writer; unprivileged users cannot spoof battery state.
+
+If this host already has a real `BAT0` (laptops), load the module with alternate names:
+
+```bash
+echo "options fake_battery_nut battery_name=BAT_UPS ac_name=AC_UPS" | sudo tee /etc/modprobe.d/fake-battery-nut.conf
 ```
 
 ## Control Interface
 
-Write to `/dev/fake_battery_nut` to set values:
+Write to `/dev/fake_battery_nut` as root or the `nut` group:
 
 ```bash
-echo "capacity=100" | sudo tee /dev/fake_battery_nut    # Battery capacity %
+echo "capacity=100" | sudo tee /dev/fake_battery_nut    # Battery capacity % (0-100)
 echo "time=1800" | sudo tee /dev/fake_battery_nut       # Runtime in seconds
 echo "voltage=24000000" | sudo tee /dev/fake_battery_nut # Voltage in µV
 echo "temp=260" | sudo tee /dev/fake_battery_nut        # Temperature (tenths of °C)
-echo "status=2" | sudo tee /dev/fake_battery_nut        # 0=discharge, 1=charge, 2=full
+echo "status=2" | sudo tee /dev/fake_battery_nut        # 0=discharge, 1=charge, 2=full, 3=not charging
 echo "charging=1" | sudo tee /dev/fake_battery_nut      # AC online status
 ```
 
@@ -124,9 +139,9 @@ echo "charging=1" | sudo tee /dev/fake_battery_nut      # AC online status
 | NUT Field | Control Command | power_supply Property |
 |-----------|-----------------|----------------------|
 | battery.charge | capacity | BAT0/capacity |
-| battery.runtime | time | BAT0/time_to_empty_avg |
+| battery.runtime | time | BAT0/time_to_empty_avg (discharging) / time_to_full_now (charging) |
 | battery.voltage | voltage | BAT0/voltage_now |
-| ups.status (OL/OB) | status, charging | BAT0/status, AC0/online |
+| ups.status (OL/OB/CHRG/FSD/OFF/NOCOMM) | status, charging | BAT0/status, AC0/online |
 | (optional) | temp | BAT0/temp |
 
 ## Requirements

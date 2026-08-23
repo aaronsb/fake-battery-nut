@@ -2,7 +2,7 @@
 # fake-battery-nut uninstaller
 set -e
 
-VERSION="1.0.0"
+VERSION="1.2.1"
 
 echo "=== Uninstalling fake-battery-nut ==="
 
@@ -29,6 +29,7 @@ dkms remove fake-battery-nut/"$VERSION" --all 2>/dev/null || true
 echo "Removing files..."
 rm -f /usr/bin/nut-to-fakebattery
 rm -f /etc/systemd/system/fake-battery-nut.service
+rm -rf /etc/systemd/system/fake-battery-nut.service.d
 rm -f /etc/modules-load.d/fake-battery-nut.conf
 rm -f /etc/udev/rules.d/99-fake-battery-nut.rules
 rm -rf /usr/src/fake-battery-nut-"$VERSION"

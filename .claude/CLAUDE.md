@@ -31,7 +31,7 @@ So we built a kernel module to bridge the gap.
 We forked [linux-fake-battery-module](https://github.com/hoelzro/linux-fake-battery-module) and enhanced it to:
 - Accept more control commands (time, voltage, status)
 - Rename the device to `/dev/fake_battery_nut`
-- Label batteries as "UPS Battery" and "UPS Load"
+- Label the supply as "UPS Battery" (with AC0 for mains)
 - Set up DKMS for kernel update survival
 
 A daemon script reads from NUT and writes to the kernel module. btop now shows UPS stats as battery info.
@@ -67,8 +67,11 @@ sudo systemctl start fake-battery-nut
 
 # Check values
 cat /sys/class/power_supply/BAT0/capacity  # UPS battery %
-cat /sys/class/power_supply/BAT1/capacity  # UPS load %
+cat /sys/class/power_supply/AC0/online     # 1=mains, 0=on battery
 ```
+
+On systems that already have a real `BAT0`, load with custom names:
+`modprobe fake_battery_nut battery_name=BAT_UPS ac_name=AC_UPS`.
 
 ## Lessons Learned
 
